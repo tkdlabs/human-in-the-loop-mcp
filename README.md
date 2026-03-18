@@ -1,3 +1,5 @@
+Fork of https://github.com/GongRzhe/Human-In-the-Loop-MCP-Server/tree/main (read-only now) fixing some UI issues, the original readme is below:
+
 # Human-In-the-Loop MCP Server
 
 ![](https://badge.mcpx.dev?type=server 'MCP Server')
@@ -414,3 +416,5 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 ---
 
 **Made with ❤️ for the AI community - Bridging humans and AI through intuitive interaction**
+=======
+# human-in-the-loop-mcp

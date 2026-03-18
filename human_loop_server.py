@@ -887,13 +887,15 @@ class MultilineInputDialog:
         # Apply modern window styling
         configure_modern_window(self.dialog)
         
-        # Set size based on platform
+        # Set size based on platform — tall enough for long prompts + input
         if IS_MACOS:
-            self.dialog.geometry("580x480")
+            self.dialog.geometry("580x560")
         elif IS_WINDOWS:
-            self.dialog.geometry("600x500")
+            self.dialog.geometry("600x580")
         else:
-            self.dialog.geometry("550x450")
+            self.dialog.geometry("550x530")
+        
+        self.dialog.minsize(400, 350)
         
         self.center_window()
         
@@ -901,9 +903,10 @@ class MultilineInputDialog:
         main_frame = tk.Frame(self.dialog, bg=self.theme_colors["bg_primary"])
         main_frame.pack(fill="both", expand=True, padx=24, pady=20)
         
-        # Configure grid weights
+        # Configure grid weights — prompt and input share vertical space
         main_frame.columnconfigure(0, weight=1)
-        main_frame.rowconfigure(2, weight=1)
+        main_frame.rowconfigure(1, weight=1)   # prompt area (scrollable)
+        main_frame.rowconfigure(2, weight=2)   # input area (gets more space)
         
         # Add modern title label
         title_label = tk.Label(
@@ -916,18 +919,38 @@ class MultilineInputDialog:
         )
         title_label.grid(row=0, column=0, sticky="ew", pady=(0, 8))
         
-        # Add prompt label with modern styling
-        prompt_label = tk.Label(
-            main_frame,
-            text=prompt,
+        # Prompt: use a read-only Text widget with scrollbar so long prompts
+        # don't push the input area and buttons off-screen.
+        prompt_container = tk.Frame(main_frame, bg=self.theme_colors["bg_primary"])
+        prompt_container.grid(row=1, column=0, sticky="nsew", pady=(0, 12))
+        prompt_container.columnconfigure(0, weight=1)
+        prompt_container.rowconfigure(0, weight=1)
+        
+        prompt_text = tk.Text(
+            prompt_container,
+            wrap="word",
+            font=get_system_font(),
             bg=self.theme_colors["bg_primary"],
             fg=self.theme_colors["fg_secondary"],
-            font=get_system_font(),
-            wraplength=520,
-            justify="left",
-            anchor="w"
+            relief="flat",
+            borderwidth=0,
+            highlightthickness=0,
+            cursor="arrow",
+            padx=0,
+            pady=0,
         )
-        prompt_label.grid(row=1, column=0, sticky="ew", pady=(0, 20))
+        prompt_text.insert("1.0", prompt)
+        prompt_text.configure(state="disabled")
+        prompt_text.grid(row=0, column=0, sticky="nsew")
+        
+        # Only show scrollbar when text overflows
+        prompt_scrollbar = tk.Scrollbar(
+            prompt_container, orient="vertical", command=prompt_text.yview
+        )
+        apply_modern_style(prompt_scrollbar, "scrollbar", self.theme_colors)
+        prompt_text.configure(yscrollcommand=prompt_scrollbar.set)
+        # Show scrollbar on the right side
+        prompt_scrollbar.grid(row=0, column=1, sticky="ns")
         
         # Create text widget container with modern styling
         text_container = tk.Frame(main_frame, bg=self.theme_colors["bg_primary"])

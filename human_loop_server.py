@@ -10,6 +10,7 @@ Now supports both Windows and macOS platforms.
 import asyncio
 import json
 import platform
+import queue
 import subprocess
 import threading
 import tkinter as tk
@@ -35,6 +36,61 @@ mcp = FastMCP("Human-in-the-Loop Server")
 # Global variable to ensure GUI is initialized properly
 _gui_initialized = False
 _gui_lock = threading.Lock()
+
+# macOS requires all NSWindow/Tkinter calls on the main thread.
+# _tk_root_main is the persistent Tk root owned by the main thread (macOS only).
+# _gui_queue carries (callable, result_holder, done_event) tuples from background
+# MCP/asyncio threads to the main thread for execution.
+_tk_root_main: "tk.Tk | None" = None
+_gui_queue: "queue.Queue" = queue.Queue()
+
+
+def _process_gui_queue():
+    """Drain pending GUI tasks dispatched from background threads (macOS only).
+
+    Called repeatedly via Tk.after() so it always runs on the main thread.
+    """
+    try:
+        while True:
+            task, result_holder, done_event = _gui_queue.get_nowait()
+            try:
+                result_holder[0] = task()
+            except Exception as exc:
+                print(f"GUI task error: {exc}")
+                result_holder[0] = None
+            finally:
+                done_event.set()
+    except queue.Empty:
+        pass
+    if _tk_root_main is not None:
+        _tk_root_main.after(50, _process_gui_queue)
+
+
+def _dispatch_to_main_thread(func, *args, timeout=300):
+    """Schedule *func(*args)* on the macOS main Tk thread and return the result.
+
+    Blocks the calling (background) thread until the GUI work completes or
+    *timeout* seconds elapse.
+    """
+    result_holder = [None]
+    done_event = threading.Event()
+    _gui_queue.put((lambda: func(*args), result_holder, done_event))
+    done_event.wait(timeout=timeout)
+    return result_holder[0]
+
+
+def _run_dialog(func, *args):
+    """Run a dialog function on the correct thread for the current platform.
+
+    On macOS the call is dispatched to the main Tk thread via the queue.
+    On other platforms a ThreadPoolExecutor worker thread is used (existing
+    behaviour, which works fine on Windows/Linux).
+    """
+    if IS_MACOS:
+        return _dispatch_to_main_thread(func, *args)
+    import concurrent.futures
+    with concurrent.futures.ThreadPoolExecutor() as executor:
+        return executor.submit(func, *args).result(timeout=300)
 
 def get_system_font():
     """Get appropriate system font for the current platform"""
@@ -258,24 +314,28 @@ def ensure_gui_initialized():
     global _gui_initialized
     with _gui_lock:
         if not _gui_initialized:
-            try:
-                test_root = tk.Tk()
-                test_root.withdraw()
-                
-                # Platform-specific initialization
-                if IS_MACOS:
-                    # macOS-specific configuration
-                    test_root.call('wm', 'attributes', '.', '-topmost', '1')
-                    configure_macos_app()
-                elif IS_WINDOWS:
-                    # Windows-specific configuration (existing behavior)
-                    test_root.attributes('-topmost', True)
-                
-                test_root.destroy()
+            if IS_MACOS and _tk_root_main is not None:
+                # Already initialised via the main-thread Tk root.
                 _gui_initialized = True
-            except Exception as e:
-                print(f"Warning: GUI initialization failed: {e}")
-                _gui_initialized = False
+            else:
+                try:
+                    test_root = tk.Tk()
+                    test_root.withdraw()
+
+                    # Platform-specific initialization
+                    if IS_MACOS:
+                        # macOS-specific configuration
+                        test_root.call('wm', 'attributes', '.', '-topmost', '1')
+                        configure_macos_app()
+                    elif IS_WINDOWS:
+                        # Windows-specific configuration (existing behavior)
+                        test_root.attributes('-topmost', True)
+
+                    test_root.destroy()
+                    _gui_initialized = True
+                except Exception as e:
+                    print(f"Warning: GUI initialization failed: {e}")
+                    _gui_initialized = False
         return _gui_initialized
 
 def configure_window_for_platform(window):
@@ -299,6 +359,9 @@ def configure_window_for_platform(window):
 def create_input_dialog(title: str, prompt: str, default_value: str = "", input_type: str = "text"):
     """Create a modern input dialog window"""
     try:
+        if IS_MACOS and _tk_root_main is not None:
+            dialog = ModernInputDialog(_tk_root_main, title, prompt, default_value, input_type)
+            return dialog.result
         root = tk.Tk()
         root.withdraw()
         dialog = ModernInputDialog(root, title, prompt, default_value, input_type)
@@ -312,6 +375,9 @@ def create_input_dialog(title: str, prompt: str, default_value: str = "", input_
 def show_confirmation(title: str, message: str):
     """Show modern confirmation dialog"""
     try:
+        if IS_MACOS and _tk_root_main is not None:
+            dialog = ModernConfirmationDialog(_tk_root_main, title, message)
+            return dialog.result
         root = tk.Tk()
         root.withdraw()
         dialog = ModernConfirmationDialog(root, title, message)
@@ -325,6 +391,9 @@ def show_confirmation(title: str, message: str):
 def show_info(title: str, message: str):
     """Show modern info dialog"""
     try:
+        if IS_MACOS and _tk_root_main is not None:
+            dialog = ModernInfoDialog(_tk_root_main, title, message)
+            return dialog.result
         root = tk.Tk()
         root.withdraw()
         dialog = ModernInfoDialog(root, title, message)
@@ -673,6 +742,9 @@ class ModernInfoDialog:
 def create_choice_dialog(title: str, prompt: str, choices: List[str], allow_multiple: bool = False):
     """Create a choice dialog window"""
     try:
+        if IS_MACOS and _tk_root_main is not None:
+            dialog = ChoiceDialog(_tk_root_main, title, prompt, choices, allow_multiple)
+            return dialog.result
         root = tk.Tk()
         root.withdraw()
         dialog = ChoiceDialog(root, title, prompt, choices, allow_multiple)
@@ -686,6 +758,9 @@ def create_choice_dialog(title: str, prompt: str, choices: List[str], allow_mult
 def create_multiline_input_dialog(title: str, prompt: str, default_value: str = ""):
     """Create a multi-line text input dialog"""
     try:
+        if IS_MACOS and _tk_root_main is not None:
+            dialog = MultilineInputDialog(_tk_root_main, title, prompt, default_value)
+            return dialog.result
         root = tk.Tk()
         root.withdraw()
         dialog = MultilineInputDialog(root, title, prompt, default_value)
@@ -1064,11 +1139,8 @@ async def get_user_input(
                 "platform": CURRENT_PLATFORM
             }
         
-        # Create the dialog in a separate thread to avoid blocking
-        import concurrent.futures
-        with concurrent.futures.ThreadPoolExecutor() as executor:
-            future = executor.submit(create_input_dialog, title, prompt, default_value, input_type)
-            result = future.result(timeout=300)  # 5 minute timeout
+        # Create the dialog, ensuring it runs on the correct thread for the platform
+        result = _run_dialog(create_input_dialog, title, prompt, default_value, input_type)
         
         if result is not None:
             if ctx:
@@ -1129,11 +1201,8 @@ async def get_user_choice(
                 "platform": CURRENT_PLATFORM
             }
         
-        # Create the dialog in a separate thread
-        import concurrent.futures
-        with concurrent.futures.ThreadPoolExecutor() as executor:
-            future = executor.submit(create_choice_dialog, title, prompt, choices, allow_multiple)
-            result = future.result(timeout=300)  # 5 minute timeout
+        # Create the dialog, ensuring it runs on the correct thread for the platform
+        result = _run_dialog(create_choice_dialog, title, prompt, choices, allow_multiple)
         
         if result is not None:
             if ctx:
@@ -1194,11 +1263,8 @@ async def get_multiline_input(
                 "platform": CURRENT_PLATFORM
             }
         
-        # Create the dialog in a separate thread
-        import concurrent.futures
-        with concurrent.futures.ThreadPoolExecutor() as executor:
-            future = executor.submit(create_multiline_input_dialog, title, prompt, default_value)
-            result = future.result(timeout=300)  # 5 minute timeout
+        # Create the dialog, ensuring it runs on the correct thread for the platform
+        result = _run_dialog(create_multiline_input_dialog, title, prompt, default_value)
         
         if result is not None:
             if ctx:
@@ -1256,11 +1322,8 @@ async def show_confirmation_dialog(
                 "platform": CURRENT_PLATFORM
             }
         
-        # Create the dialog in a separate thread
-        import concurrent.futures
-        with concurrent.futures.ThreadPoolExecutor() as executor:
-            future = executor.submit(show_confirmation, title, message)
-            result = future.result(timeout=300)  # 5 minute timeout
+        # Create the dialog, ensuring it runs on the correct thread for the platform
+        result = _run_dialog(show_confirmation, title, message)
         
         if ctx:
             await ctx.info(f"User confirmation result: {'Yes' if result else 'No'}")
@@ -1306,11 +1369,8 @@ async def show_info_message(
                 "platform": CURRENT_PLATFORM
             }
         
-        # Create the dialog in a separate thread
-        import concurrent.futures
-        with concurrent.futures.ThreadPoolExecutor() as executor:
-            future = executor.submit(show_info, title, message)
-            result = future.result(timeout=300)  # 5 minute timeout
+        # Create the dialog, ensuring it runs on the correct thread for the platform
+        result = _run_dialog(show_info, title, message)
         
         if ctx:
             await ctx.info("Info message acknowledged by user")
@@ -1510,19 +1570,39 @@ def main():
     elif IS_LINUX:
         print("Linux detected - Using Linux-compatible GUI settings with modern styling")
     
-    # Test GUI availability
-    if ensure_gui_initialized():
-        print(" GUI system initialized successfully")
-        if IS_MACOS:
-            print(" macOS GUI optimizations applied")
-    else:
-        print(" Warning: GUI system may not be available")
-    
-    print("")
     print("Starting MCP server...")
-    
-    # Run the server
-    mcp.run()
+
+    if IS_MACOS:
+        # On macOS, AppKit requires NSWindow to be created on the main thread.
+        # We keep the main thread for Tkinter's mainloop and run the MCP/asyncio
+        # server on a background daemon thread.
+        global _tk_root_main, _gui_initialized
+
+        _tk_root_main = tk.Tk()
+        _tk_root_main.withdraw()
+        _tk_root_main.call('wm', 'attributes', '.', '-topmost', '1')
+        configure_macos_app()
+        _gui_initialized = True
+
+        print(" GUI system initialized successfully")
+        print(" macOS GUI optimizations applied (main-thread Tk)")
+        print("")
+
+        server_thread = threading.Thread(target=mcp.run, daemon=True)
+        server_thread.start()
+
+        # Start processing the GUI dispatch queue and hand control to Tk.
+        _tk_root_main.after(50, _process_gui_queue)
+        _tk_root_main.mainloop()
+    else:
+        # Test GUI availability
+        if ensure_gui_initialized():
+            print(" GUI system initialized successfully")
+        else:
+            print(" Warning: GUI system may not be available")
+
+        print("")
+        mcp.run()
 
 if __name__ == "__main__":
     main()
